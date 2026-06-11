@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Wordle Italiano</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #fff; font-family: sans-serif; }
+    @keyframes shake {
+      0%,100% { transform: translateX(0); }
+      25% { transform: translateX(-6px); }
+      75% { transform: translateX(6px); }
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useCallback } = React;
+
+    const KEY_ROWS = [
+      ["Q","W","E","R","T","Y","U","I","O","P"],
+      ["A","S","D","F","G","H","J","K","L"],
+      ["ENTER","Z","X","C","V","B","N","M","BACK"],
+    ];
+
+    const TILE_BG = { correct: "#1D9E75", present: "#BA7517", absent: "#888780" };
+    const KEY_BG  = { correct: "#1D9E75", present: "#BA7517", absent: "#B4B2A9" };
+
+    // ⚠️ Inserisci qui la tua API key di Anthropic
+    const API_KEY = "TUA_API_KEY_QUI";
+
+    function evalGuess(guess, target) {
+      const res = Array(guess.length).fill("absent");
+      const tArr = target.split("");
+      const used = Array(target.length).fill(false);
+      guess.split("").forEach((l, i) => {
+        if (l === tArr[i]) { res[i] = "correct"; used[i] = true; }
+      });
+      guess.split("").forEach((l, i) => {
+        if (res[i] === "correct") return;
+        const j = tArr.findIndex((tl, ti) => tl === l && !used[ti]);
+        if (j !== -1) { res[i] = "present"; used[j] = true; }
+      });
+      return res;
+    }
+
+    function calcScore(attemptNumber, maxAttempts) {
+      return Math.max(1, maxAttempts + 1 - attemptNumber);
+    }
+
+    async function callClaude(prompt, maxTokens = 80) {
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": API_KEY,
+          "anthropic-version": "2023-06-01",
+          "anthropic-dangerous-direct-browser-access": "true"
+        },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-20250514",
+          max_tokens: maxTokens,
+          messages: [{ role: "user", content: prompt }],
+        }),
+      });
+      const data = await res.json();
+      return data.content?.[0]?.text?.trim() || "";
+    }
+
+    function pickRevealLetter(target, evals) {
+      const correct = new Set();
+      evals.forEach(ev => ev.forEach((s, i) => { if (s === "correct") correct.add(i); }));
+      const candidates = target.split("").map((l, i) => ({ letter: l, index: i })).filter(x => !correct.has(x.index));
+      if (!candidates.length) return null;
+      return candidates[Math.floor(Math.random() * candidates.length)];
+    }
+
+    function pickFixLetter(target, guesses, evals) {
+      const correct = new Set();
+      evals.forEach(ev => ev.forEach((s, i) => { if (s === "correct") correct.add(i); }));
+      const presentLetters = [];
+      evals.forEach((ev, gi) => {
+        ev.forEach((s, ci) => {
+          if (s === "present") {
+            const letter = guesses[gi][ci];
+            const correctIdx = target.split("").findIndex((tl, ti) => tl === letter && !correct.has(ti));
+            if (correctIdx !== -1) presentLetters.push({ letter, correctIdx });
+          }
+        });
+      });
+      if (!presentLetters.length) return null;
+      return presentLetters[Math.floor(Math.random() * presentLetters.length)];
+    }
+
+    function getStorage(key) {
+      try { return JSON.parse(localStorage.getItem(key)); } catch { return null; }
+    }
+    function setStorage(key, val) {
+      try { localStorage.setItem(key, JSON.stringify(val)); } catch {}
+    }
+
+    function App() {
+      const [len, setLen] = useState(5);
+      const [phase, setPhase] = useState("setup");
+      const [target, setTarget] = useState("");
+      const [guesses, setGuesses] = useState([]);
+      const [evals, setEvals] = useState([]);
+      const [curr, setCurr] = useState("");
+      const [keys, setKeys] = useState({});
+      const [msg, setMsg] = useState("");
+      const [hint, setHint] = useState(null);
+      const [clueText, setClueText] = useState("");
+      const [loadingClue, setLoadingClue] = useState(false);
+      const [explanation, setExplanation] = useState("");
+      const [shake, setShake] = useState(false);
+      const [totalScore, setTotalScore] = useState(0);
+      const [lastScore, setLastScore] = useState(null);
+      const [penalties, setPenalties] = useState(0);
+
+      const maxAttempts = len + 1;
+      const ts = Math.min(52, Math.floor(310 / len));
+      const fs = len > 8 ? 13 : 18;
+      const hasPresentLetters = evals.some(ev => ev.some(s => s === "present"));
+
+      useEffect(() => {
+        const s = getStorage("wordle_total_score");
+        if (s !== null) setTotalScore(s);
+      }, []);
+
+      const startGame = async () => {
+        setPhase("loading");
+        setMsg(""); setHint(null); setClueText(""); setExplanation(""); setLastScore(null); setPenalties(0);
+        setGuesses([]); setEvals([]); setCurr(""); setKeys({});
+
+        const usedWords = getStorage(`wordle_used_${len}`) || [];
+
+        let word = null;
+        for (let i = 0; i < 5 && !word; i++) {
+          const raw = await callClaude(
+            `Genera UNA SOLA parola italiana comune di ESATTAMENTE ${len} lettere.
+Scegli sostantivi, aggettivi o verbi all'infinito di uso comune.
+Rispondi SOLO con la parola in MAIUSCOLO, nessun altro testo.
+Solo lettere A-Z senza accenti o spazi. La parola deve avere esattamente ${len} lettere.
+${usedWords.length > 0 ? `NON usare queste parole già utilizzate: ${usedWords.slice(-30).join(", ")}` : ""}`
+          );
+          const w = raw.replace(/[^A-Z]/g, "").slice(0, len);
+          if (w.length === len && !usedWords.includes(w)) word = w;
+        }
+        if (!word) { setMsg("Errore nella generazione. Riprova."); setPhase("setup"); return; }
+
+        const updated = [...usedWords.filter(w => w !== word), word];
+        setStorage(`wordle_used_${len}`, updated);
+        setTarget(word);
+        setPhase("playing");
+      };
+
+      const submit = useCallback(async () => {
+        if (curr.length !== len) {
+          setMsg(`Inserisci ${len} lettere`);
+          setShake(true); setTimeout(() => setShake(false), 400);
+          return;
+        }
+        const ev = evalGuess(curr, target);
+        const newGuesses = [...guesses, curr];
+        const newEvals = [...evals, ev];
+        setGuesses(newGuesses); setEvals(newEvals); setCurr(""); setMsg(""); setHint(null); setClueText("");
+        const newKeys = { ...keys };
+        curr.split("").forEach((l, i) => {
+          const s = ev[i];
+          if (!newKeys[l] || (newKeys[l] === "absent" && s !== "absent") || s === "correct") newKeys[l] = s;
+        });
+        setKeys(newKeys);
+        if (curr === target) {
+          const base = calcScore(newGuesses.length, maxAttempts);
+          const score = Math.max(0, base - penalties);
+          setLastScore({ score, base, penalties });
+          const newTotal = totalScore + score;
+          setTotalScore(newTotal);
+          setStorage("wordle_total_score", newTotal);
+          setPhase("won");
+          callClaude(`Spiega in 1-2 frasi il significato della parola italiana "${target}".`, 120).then(setExplanation);
+        } else if (newGuesses.length >= maxAttempts) {
+          setPhase("lost");
+          callClaude(`Spiega in 1-2 frasi il significato della parola italiana "${target}".`, 120).then(setExplanation);
+        }
+      }, [curr, target, len, guesses, evals, keys, maxAttempts, totalScore, penalties]);
+
+      const handleKey = useCallback((k) => {
+        if (phase !== "playing") return;
+        if (k === "ENTER") { submit(); return; }
+        if (k === "BACK") { setCurr(g => g.slice(0, -1)); setMsg(""); return; }
+        if (/^[A-Z]$/.test(k) && curr.length < len) { setCurr(g => g + k); setMsg(""); }
+      }, [phase, curr, len, submit]);
+
+      useEffect(() => {
+        const h = (e) => {
+          const k = e.key.toUpperCase();
+          if (k === "ENTER") handleKey("ENTER");
+          else if (k === "BACKSPACE") handleKey("BACK");
+          else if (/^[A-Z]$/.test(k)) handleKey(k);
+        };
+        window.addEventListener("keydown", h);
+        return () => window.removeEventListener("keydown", h);
+      }, [handleKey]);
+
+      const showClue = async () => {
+        setHint(null); setLoadingClue(true);
+        setPenalties(p => p + 0.5);
+        const text = await callClaude(
+          `La parola del Wordle è "${target}" (${len} lettere). Il giocatore ha fatto ${guesses.length} tentativi.
+Dai un indizio breve (max 20 parole) sul significato o utilizzo della parola, SENZA mai menzionarla direttamente.`, 80
+        );
+        setClueText(text); setLoadingClue(false);
+      };
+
+      const showRevealHint = () => {
+        setClueText("");
+        setPenalties(p => p + 1);
+        const h = pickRevealLetter(target, evals);
+        if (!h) { setMsg("Nessuna lettera da rivelare!"); return; }
+        setHint({ ...h, type: "reveal" });
+      };
+
+      const showFixHint = () => {
+        setClueText("");
+        setPenalties(p => p + 1);
+        const h = pickFixLetter(target, guesses, evals);
+        if (!h) { setMsg("Nessuna lettera da sistemare!"); return; }
+        setHint({ index: h.correctIdx, letter: h.letter, type: "fix" });
+      };
+
+      const scoreLabel = (s) => {
+        if (s >= maxAttempts) return "🏆 Perfetto!";
+        if (s >= maxAttempts - 1) return "🥇 Ottimo!";
+        if (s >= Math.ceil(maxAttempts / 2)) return "🥈 Bravo!";
+        if (s > 0) return "🥉 Ce l'hai fatta!";
+        return "😅 Indovinata, ma senza punti!";
+      };
+
+      const grid = Array(maxAttempts).fill(null).map((_, r) => {
+        if (r < guesses.length) return { letters: guesses[r].split(""), ev: evals[r] };
+        if (r === guesses.length && phase === "playing") return { letters: curr.padEnd(len, "").split(""), ev: null };
+        return { letters: Array(len).fill(""), ev: null };
+      });
+
+      return (
+        <div style={{ maxWidth: 500, margin: "0 auto", padding: "1rem 0.75rem" }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
+            <div style={{ width: 80 }} />
+            <h2 style={{ textAlign: "center", fontSize: 20, fontWeight: 600, letterSpacing: 3 }}>WORDLE ITALIANO</h2>
+            <div style={{ width: 80, textAlign: "right" }}>
+              <span style={{ fontSize: 12, color: "#888" }}>Punteggio</span>
+              <div style={{ fontSize: 20, fontWeight: 700, color: "#1D9E75", lineHeight: 1 }}>{totalScore}</div>
+            </div>
+          </div>
+          <p style={{ textAlign: "center", fontSize: 12, color: "#888", margin: "0 0 1rem" }}>Indovina la parola italiana</p>
+
+          {phase === "setup" && (
+            <div style={{ textAlign: "center" }}>
+              <p style={{ fontSize: 13, color: "#666", margin: "0 0 10px" }}>Scegli la lunghezza della parola:</p>
+              <div style={{ display: "flex", justifyContent: "center", gap: 6, flexWrap: "wrap", marginBottom: 20 }}>
+                {[3,4,5,6,7,8,9,10,11,12].map(n => (
+                  <button key={n} onClick={() => setLen(n)} style={{
+                    width: 36, height: 36, borderRadius: 6,
+                    border: len === n ? "2px solid #1D9E75" : "1px solid #ccc",
+                    background: len === n ? "#E1F5EE" : "#fff",
+                    color: len === n ? "#085041" : "#333",
+                    fontWeight: len === n ? 700 : 400, cursor: "pointer", fontSize: 13
+                  }}>{n}</button>
+                ))}
+              </div>
+              <div style={{ display: "flex", justifyContent: "center", flexWrap: "wrap", gap: 5, marginBottom: 8 }}>
+                {Array.from({ length: len }, (_, i) => (
+                  <div key={i} style={{
+                    width: Math.min(48, Math.floor(300 / len)),
+                    height: Math.min(48, Math.floor(300 / len)),
+                    border: "2px solid #ccc", borderRadius: 4, background: "#fff"
+                  }} />
+                ))}
+              </div>
+              <p style={{ fontSize: 12, color: "#aaa", margin: "0 0 18px" }}>{len + 1} tentativi disponibili • max {len} punti</p>
+              <button onClick={startGame} style={{
+                padding: "9px 28px", borderRadius: 8, border: "none",
+                background: "#1D9E75", color: "#fff", fontWeight: 600, fontSize: 14, cursor: "pointer"
+              }}>Inizia partita</button>
+              {msg && <p style={{ color: "#c00", marginTop: 10, fontSize: 13 }}>{msg}</p>}
+            </div>
+          )}
+
+          {phase === "loading" && (
+            <p style={{ textAlign: "center", color: "#888", fontSize: 14, padding: "2rem 0" }}>Sto scegliendo la parola…</p>
+          )}
+
+          {(phase === "playing" || phase === "won" || phase === "lost") && (
+            <>
+              <p style={{ textAlign: "center", fontSize: 12, color: "#aaa", margin: "0 0 10px" }}>
+                Tentativo {Math.min(guesses.length + 1, maxAttempts)} di {maxAttempts}
+              </p>
+              <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 5, marginBottom: 14 }}>
+                {grid.map((row, r) => (
+                  <div key={r} style={{ display: "flex", gap: 5, animation: shake && r === guesses.length ? "shake 0.4s" : "none" }}>
+                    {row.letters.map((l, c) => {
+                      const isHinted = hint && !row.ev && r === guesses.length && c === hint.index;
+                      const bg  = row.ev ? TILE_BG[row.ev[c]] : isHinted ? (hint.type === "fix" ? "#BA7517" : "#1D9E75") : "#fff";
+                      const bdr = row.ev ? `2px solid ${TILE_BG[row.ev[c]]}` : isHinted ? `2px solid ${hint.type === "fix" ? "#BA7517" : "#1D9E75"}` : l ? "2px solid #999" : "2px solid #ccc";
+                      const col = row.ev ? "#fff" : isHinted ? "#fff" : "#333";
+                      return (
+                        <div key={c} style={{
+                          width: ts, height: ts, display: "flex", alignItems: "center", justifyContent: "center",
+                          fontSize: fs, fontWeight: 700, borderRadius: 4,
+                          background: bg, border: bdr, color: col, transition: "background 0.2s"
+                        }}>{isHinted ? hint.letter : l}</div>
+                      );
+                    })}
+                  </div>
+                ))}
+              </div>
+
+              {msg && <p style={{ textAlign: "center", color: "#BA7517", fontSize: 13, margin: "0 0 8px" }}>{msg}</p>}
+
+              {phase === "playing" && (
+                <div style={{ textAlign: "center", marginBottom: 14 }}>
+                  <div style={{ display: "flex", justifyContent: "center", gap: 8, flexWrap: "wrap" }}>
+                    <button onClick={showClue} disabled={loadingClue} style={{
+                      fontSize: 12, padding: "6px 14px", borderRadius: 6,
+                      border: "1px solid #ccc", background: "#f5f5f5", color: "#555", cursor: "pointer"
+                    }}>{loadingClue ? "…" : "🔍 Indizio"}</button>
+                    <button onClick={showRevealHint} style={{
+                      fontSize: 12, padding: "6px 14px", borderRadius: 6,
+                      border: "1px solid #1D9E75", background: "#E1F5EE", color: "#085041", cursor: "pointer"
+                    }}>💡 Rivela lettera</button>
+                    <button onClick={showFixHint} disabled={!hasPresentLetters} style={{
+                      fontSize: 12, padding: "6px 14px", borderRadius: 6,
+                      border: hasPresentLetters ? "1px solid #BA7517" : "1px solid #ccc",
+                      background: hasPresentLetters ? "#FDF3E3" : "#f0f0f0",
+                      color: hasPresentLetters ? "#7A4A00" : "#aaa",
+                      cursor: hasPresentLetters ? "pointer" : "not-allowed"
+                    }}>🔀 Metti al posto giusto</button>
+                  </div>
+                  {clueText && <p style={{ fontSize: 13, color: "#555", margin: "10px 12px 0", fontStyle: "italic" }}>🔍 {clueText}</p>}
+                  {hint?.type === "reveal" && <p style={{ fontSize: 13, color: "#1D9E75", margin: "8px 0 0", fontWeight: 500 }}>La lettera <strong>{hint.letter}</strong> è in posizione {hint.index + 1}</p>}
+                  {hint?.type === "fix" && <p style={{ fontSize: 13, color: "#BA7517", margin: "8px 0 0", fontWeight: 500 }}>La lettera <strong>{hint.letter}</strong> va in posizione {hint.index + 1}</p>}
+                  {penalties > 0 && <p style={{ fontSize: 11, color: "#c0392b", margin: "6px 0 0" }}>Penalità accumulata: -{penalties} {penalties === 1 ? "punto" : "punti"}</p>}
+                </div>
+              )}
+
+              {(phase === "won" || phase === "lost") && (
+                <div style={{ textAlign: "center", padding: "12px 16px", marginBottom: 12, background: "#f9f9f9", borderRadius: 10, border: "1px solid #eee" }}>
+                  {phase === "won" && lastScore !== null && (
+                    <div style={{ marginBottom: 8 }}>
+                      <span style={{ fontSize: 22 }}>{scoreLabel(lastScore.score)}</span>
+                      <div style={{ marginTop: 4 }}>
+                        <span style={{ fontSize: 26, fontWeight: 700, color: "#1D9E75" }}>+{lastScore.score}</span>
+                        <span style={{ fontSize: 13, color: "#888", marginLeft: 6 }}>punti • Totale: {totalScore}</span>
+                      </div>
+                      {lastScore.penalties > 0 && (
+                        <p style={{ fontSize: 12, color: "#c0392b", margin: "3px 0 0" }}>(base {lastScore.base} − {lastScore.penalties} di penalità)</p>
+                      )}
+                      <p style={{ fontSize: 13, color: "#555", margin: "4px 0 0" }}>Indovinato al tentativo {guesses.length} su {maxAttempts}</p>
+                    </div>
+                  )}
+                  {phase === "lost" && (
+                    <p style={{ fontWeight: 600, fontSize: 15, margin: "0 0 4px", color: "#993C1D" }}>
+                      La parola era: <strong>{target}</strong>
+                    </p>
+                  )}
+                  {explanation
+                    ? <p style={{ fontSize: 13, color: "#555", margin: "6px 0 0", lineHeight: 1.5 }}>{explanation}</p>
+                    : <p style={{ fontSize: 12, color: "#aaa", margin: "6px 0 0" }}>Caricamento definizione…</p>}
+                  <button onClick={() => setPhase("setup")} style={{
+                    marginTop: 12, padding: "7px 22px", borderRadius: 8, border: "none",
+                    background: "#1D9E75", color: "#fff", fontWeight: 600, fontSize: 13, cursor: "pointer"
+                  }}>Nuova partita</button>
+                </div>
+              )}
+
+              <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 5 }}>
+                {KEY_ROWS.map((row, ri) => (
+                  <div key={ri} style={{ display: "flex", gap: 4 }}>
+                    {row.map(k => {
+                      const st = keys[k];
+                      return (
+                        <button key={k} onClick={() => handleKey(k)} style={{
+                          minWidth: (k === "ENTER" || k === "BACK") ? 50 : 30, height: 40, borderRadius: 4,
+                          border: "none", background: st ? KEY_BG[st] : "#e0e0e0",
+                          color: st ? "#fff" : "#333", fontWeight: 600,
+                          fontSize: (k === "ENTER" || k === "BACK") ? 10 : 13,
+                          cursor: "pointer", padding: "0 2px"
+                        }}>{k === "BACK" ? "⌫" : k}</button>
+                      );
+                    })}
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>

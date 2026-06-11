@@ -224,7 +224,7 @@
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
             <div style={{ width: 80 }} />
             <div style={{ textAlign: "center" }}>
-              <h2 style={{ fontSize: 30, fontWeight: 600, letterSpacing: 3 }}>LA PAROLA</h2>
+              <h2 style={{ fontSize: 20, fontWeight: 600, letterSpacing: 3, background: "#085041", color: "#fff", padding: "8px 28px", borderRadius: 10, boxShadow: "0 2px 8px rgba(0,0,0,0.15)" }}>LA PAROLA</h2>
               <p style={{ fontSize: 20, color: "#333", margin: "8px 0 8px" }}>Il gioco preferito dalla Virgy</p>
             </div>
             <div style={{ width: 80, textAlign: "right" }}>
@@ -235,7 +235,7 @@
           
           {phase === "setup" && (
             <div style={{ textAlign: "center" }}>
-              <p style={{ fontSize: 13, color: "#666", margin: "0 0 10px" }}>Scegli la lunghezza della parola:</p>
+              <p style={{ fontSize: 20, color: "#1D9E75", margin: "10px 0 30px" }}>Scegli la lunghezza della parola:</p>
               <div style={{ display: "flex", justifyContent: "center", gap: 6, flexWrap: "wrap", marginBottom: 20 }}>
                 {[3,4,5,6,7,8,9,10,11,12].map(n => (
                   <button key={n} onClick={() => setLen(n)} style={{

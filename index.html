@@ -47,7 +47,8 @@
       ["A","S","D","F","G","H","J","K","L"],
       ["ENTER","Z","X","C","V","B","N","M","BACK"],
     ];
-
+    const TILE_BG = { correct: "#1D9E75", present: "#BA7517", absent: "#888780" };
+    const KEY_BG  = { correct: "#1D9E75", present: "#BA7517", absent: "#B4B2A9" };
     function evalGuess(guess, target) {
       const res = Array(guess.length).fill("absent");
       const tArr = target.split("");
